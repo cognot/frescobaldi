@@ -77,8 +77,9 @@ def parse_commandline():
         parser.add_option('-p', '--port')
         parser.add_option('-f', '--file')
         parser.add_option('-o', '--output')
-
-
+    # Same thing for the profiler.
+    elif "cProfile" in sys.modules:
+        parser.add_option('-o', '--output')
 
     args = QApplication.arguments()
     if os.name == 'nt' and args and 'python' in os.path.basename(args[0]).lower():
