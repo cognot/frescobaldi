@@ -75,12 +75,10 @@ def openUrl(url, encoding=None):
             and not documents[0].isUndoAvailable()
             and not documents[0].isRedoAvailable()):
             d = documents[0]
-            d.setUrl(url)
-            d.setEncoding(encoding)
-            d.load()
+            d.load(url, encoding)
         else:
             import document
-            d = document.Document(url, encoding)
+            d = document.Document.new_from_url(url, encoding)
     return d
 
 def findDocument(url):

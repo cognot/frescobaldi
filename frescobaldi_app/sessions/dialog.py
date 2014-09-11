@@ -26,10 +26,11 @@ from __future__ import unicode_literals
 import os
 import json
 
-from PyQt4.QtCore import Qt, QUrl
+from PyQt4.QtCore import Qt, QSettings, QUrl
 from PyQt4.QtGui import (
-    QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QGridLayout, 
-    QLabel, QLineEdit, QMessageBox, QPushButton, QVBoxLayout)
+    QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, 
+    QGridLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QVBoxLayout,
+    QWidget)
 
 import app
 import widgets.listedit
@@ -96,8 +97,15 @@ class SessionManagerDialog(QDialog):
         importfile = QFileDialog.getOpenFileName(mainwindow, caption, directory, filetypes)
         if not importfile:
             return # cancelled by user
-        with open(importfile) as f:
-            self.sessions.importItem(json.load(f))
+        try:
+            with open(importfile) as f:
+                self.sessions.importItem(json.load(f))
+        except IOError as e:
+            msg = _("{message}\n\n{strerror} ({errno})").format(
+                message = _("Could not read from: {url}").format(url=importfile),
+                strerror = e.strerror,
+                errno = e.errno)
+            QMessageBox.critical(self, app.caption(_("Error")), msg)
 		
     def exportSession(self):
         """Called when the user clicks Export."""
@@ -110,8 +118,15 @@ class SessionManagerDialog(QDialog):
         filename = QFileDialog.getSaveFileName(mainwindow, caption, filename, filetypes)
         if not filename:
             return False # cancelled
-        with open(filename, 'w') as f:
-            json.dump(jsondict, f, indent=4)
+        try:
+            with open(filename, 'w') as f:
+                json.dump(jsondict, f, indent=4)
+        except IOError as e:
+            msg = _("{message}\n\n{strerror} ({errno})").format(
+                message = _("Could not write to: {url}").format(url=filename),
+                strerror = e.strerror,
+                errno = e.errno)
+            QMessageBox.critical(self, app.caption(_("Error")), msg)
     
     def activateSession(self):
         """Called when the user clicks Activate."""
@@ -159,7 +174,10 @@ class SessionList(widgets.listedit.ListEdit):
                 session.setValue("urls", urls)
             elif key != 'name':
                 session.setValue(key, data[key])
-		self.load()
+        self.load()
+        names = sessions.sessionNames()
+        if name in names:
+            self.setCurrentRow(names.index(name))
         
     def exportItem(self):
         """Implement exporting the currently selected session item to a dict.
@@ -171,13 +189,13 @@ class SessionList(widgets.listedit.ListEdit):
         item = self.listBox.currentItem()
         s = sessions.sessionGroup(item.text())
         for key in s.allKeys():
-			if key == 'urls':
-				urls = []
-				for u in s.value(key):
-					urls.append(u.toString())
-				jsondict[key] = urls 
-			else:
-				jsondict[key] = s.value(key)
+            if key == 'urls':
+                urls = []
+                for u in s.value(key):
+                    urls.append(u.toString())
+                jsondict[key] = urls 
+            else:
+                jsondict[key] = s.value(key)
         return (item.text(), jsondict)
 
 
@@ -207,6 +225,29 @@ class SessionEditor(QDialog):
         grid.addWidget(l, 2, 0)
         grid.addWidget(self.basedir, 2, 1)
         
+        self.setPaths = QCheckBox()
+        grid.addWidget(self.setPaths, 3, 1)
+        
+        self.inclPaths = ip = QWidget(self)
+        ipLayout = QVBoxLayout()
+        ip.setLayout(ipLayout)
+        
+        self.include = widgets.listedit.FilePathEdit()
+        self.include.listBox.setDragDropMode(QAbstractItemView.InternalMove)
+        ipLayout.addWidget(self.include)
+        
+        grid.addWidget(ip, 4, 1)
+        
+        self.revt = QPushButton(self)
+        self.clean = QPushButton(self)
+        self.revt.clicked.connect(self.revertPaths)
+        self.clean.clicked.connect(self.cleanPaths)
+       
+        self.include.layout().addWidget(self.revt, 5, 1)
+        self.include.layout().addWidget(self.clean, 6, 1)
+        
+        self.setPaths.toggled.connect(self.showInclPaths)
+        
         layout.addWidget(widgets.Separator())
         self.buttons = b = QDialogButtonBox(self)
         layout.addWidget(b)
@@ -220,22 +261,65 @@ class SessionEditor(QDialog):
         self.nameLabel.setText(_("Name:"))
         self.autosave.setText(_("Always save the list of documents in this session"))
         self.basedirLabel.setText(_("Base directory:"))
+        self.setPaths.setText(_("Use session specific include paths"))
+        self.revt.setText(_("Revert"))
+        self.revt.setToolTip(_("Revert paths from LilyPond preferences."))
+        self.clean.setText(_("Clean"))
+        self.clean.setToolTip(_("Remove all paths."))
+        self.inclPaths.setEnabled(False)
     
     def load(self, name):
         settings = sessions.sessionGroup(name)
         self.autosave.setChecked(settings.value("autosave", True, bool))
         self.basedir.setPath(settings.value("basedir", "", type("")))
+        try:
+            paths = settings.value("include-path", [], type(""))
+        except TypeError:
+            paths = []
+        self.include.setValue(paths)
+        self.setPaths.setChecked(settings.value("set-paths", False, bool))
         # more settings here
+        
+    def showInclPaths(self):
+        """Show and hide the settings for session specific include paths."""
+        if self.setPaths.isChecked():
+            self.inclPaths.setEnabled(True)
+        else:
+            self.inclPaths.setEnabled(False)     
+        
+    def fetchGenPaths(self):
+        """Fetch paths from general preferences."""
+        s = QSettings()
+        s.beginGroup("lilypond_settings")
+        try:
+            return s.value("include_path", [], type(""))
+        except TypeError:
+            return []
+            
+    def revertPaths(self):
+        """Revert paths from general preferences."""
+        self.include.setValue(self.fetchGenPaths())
+		
+    def cleanPaths(self):
+        """Remove all paths."""
+        self.include.setValue([])	
         
     def save(self, name):
         settings = sessions.sessionGroup(name)
         settings.setValue("autosave", self.autosave.isChecked())
         settings.setValue("basedir", self.basedir.path())
+        settings.setValue("set-paths", self.setPaths.isChecked())
+        if self.setPaths.isChecked(): 
+            settings.setValue("include-path", self.include.value())
+        else:
+            settings.remove("include-path")
         # more settings here
         
     def defaults(self):
         self.autosave.setChecked(True)
         self.basedir.setPath('')
+        self.setPaths.setChecked(False)
+        self.include.setValue(self.fetchGenPaths())
         # more defaults here
         
     def edit(self, name=None):

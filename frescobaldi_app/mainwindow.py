@@ -266,10 +266,8 @@ class MainWindow(QMainWindow):
     def dropEvent(self, ev):
         if not ev.source() and ev.mimeData().hasUrls():
             ev.accept()
-            docs = [self.openUrl(url) for url in ev.mimeData().urls()]
-            if docs:
-                self.setCurrentDocument(docs[-1])
-        
+            self.openDocuments(ev.mimeData().urls())
+    
     def dragEnterEvent(self, ev):
         if not ev.source() and ev.mimeData().hasUrls():
             ev.accept()
@@ -371,16 +369,42 @@ class MainWindow(QMainWindow):
         settings.setValue('state', self.saveState())
 
     def openUrl(self, url, encoding=None):
-        """Same as app.openUrl but with some error checking and recent files."""
-        if not url.toLocalFile():
-            # we only support local files
-            QMessageBox.warning(self, app.caption(_("Warning")),
-                _("Can't load non-local document:\n\n{url}").format(
-                    url=url.toString()))
-        else:
-            recentfiles.add(url)
-        return app.openUrl(url, encoding)
+        """Same as app.openUrl but adds url to recent files."""
+        d = app.openUrl(url, encoding)
+        recentfiles.add(url)
+        return d
     
+    def openDocuments(self, urls, encoding=None):
+        """Open a list of urls, with error handling.
+        
+        The last loaded document is made current.
+        
+        """
+        doc = None
+        failures = []
+        for url in urls:
+            try:
+                doc = self.openUrl(url)
+            except IOError as e:
+                failures.append((url, e))
+        if doc:
+            self.setCurrentDocument(doc)
+        if failures:
+            if len(failures) == 1:
+                url, e = failures[0]
+                filename = url.toLocalFile()
+                msg = _("{message}\n\n{strerror} ({errno})").format(
+                    message = _("Could not read from: {url}").format(url=filename),
+                    strerror = e.strerror,
+                    errno = e.errno)
+            else:
+                msg = _("Could not read:") + "\n\n" + "\n".join(
+                    "{url}: {strerror} ({errno})".format(
+                        url = url.toLocalFile(),
+                        strerror = e.strerror,
+                        errno = e.errno) for url, e in failures)
+            QMessageBox.critical(self, app.caption(_("Error")), msg)
+                
     def currentDirectory(self):
         """Returns the current directory of the current document.
         
@@ -432,63 +456,62 @@ class MainWindow(QMainWindow):
         caption = app.caption(_("dialog title", "Open File"))
         directory = os.path.dirname(self.currentDocument().url().toLocalFile()) or app.basedir()
         files = QFileDialog.getOpenFileNames(self, caption, directory, filetypes)
-        docs = [self.openUrl(QUrl.fromLocalFile(f)) for f in files]
-        if docs:
-            self.setCurrentDocument(docs[-1])
+        urls = [QUrl.fromLocalFile(filename) for filename in files]
+        self.openDocuments(urls)
         
-    def saveDocument(self, doc):
+    def saveDocument(self, doc, save_as=False):
         """ Saves the document, asking for a name if necessary.
         
+        If save_as is True, a name is always asked.
         Returns True if saving succeeded.
         
         """
-        if doc.url().isEmpty():
-            return self.saveDocumentAs(doc)
-        filename = dest = doc.url().toLocalFile()
-        if not filename:
-            dest = doc.url().toString()
-        if not util.iswritable(filename):
-            QMessageBox.warning(self, app.caption(_("Error")),
-                _("Can't write to destination:\n\n{url}").format(url=dest))
-            return False
+        if save_as or doc.url().isEmpty():
+            filename = doc.url().toLocalFile()
+            if filename:
+                filetypes = app.filetypes(os.path.splitext(filename)[1])
+            else:
+                filename = app.basedir() # default directory to save to
+                import documentinfo
+                import ly.lex
+                filetypes = app.filetypes(ly.lex.extensions[documentinfo.mode(doc)])
+            caption = app.caption(_("dialog title", "Save File"))
+            filename = QFileDialog.getSaveFileName(self, caption, filename, filetypes)
+            if not filename:
+                return False # cancelled
+            url = QUrl.fromLocalFile(filename)
+        else:
+            url = doc.url()
+        
         if QSettings().value("strip_trailing_whitespace", False, bool):
             import reformat
             reformat.remove_trailing_whitespace(QTextCursor(doc))
+
+        # we only support local files for now
+        filename = url.toLocalFile()
         b = backup.backup(filename)
-        success = doc.save()
-        if not success:
-            QMessageBox.warning(self, app.caption(_("Error")),
-                _("Can't write to destination:\n\n{url}").format(url=filename))
-        elif b:
-            backup.removeBackup(filename)
-        return success
+        try:
+            doc.save(url)
+        except IOError as e:
+            msg = _("{message}\n\n{strerror} ({errno})").format(
+                message = _("Could not write to: {url}").format(url=filename),
+                strerror = e.strerror,
+                errno = e.errno)
+            QMessageBox.critical(self, app.caption(_("Error")), msg)
+            return False
+        else:
+            if b:
+                backup.removeBackup(filename)
+            recentfiles.add(doc.url())
+        return True
             
     def saveDocumentAs(self, doc):
         """ Saves the document, always asking for a name.
         
-        Returns True if saving succeeded.
+        Returns True if saving succeeded, False if it failed or was cancelled.
         
         """
-        filename = doc.url().toLocalFile()
-        if filename:
-            filetypes = app.filetypes(os.path.splitext(filename)[1])
-        else:
-            filename = app.basedir() # default directory to save to
-            import documentinfo
-            import ly.lex
-            filetypes = app.filetypes(ly.lex.extensions[documentinfo.mode(doc)])
-        caption = app.caption(_("dialog title", "Save File"))
-        filename = QFileDialog.getSaveFileName(self, caption, filename, filetypes)
-        if not filename:
-            return False # cancelled
-        if not util.iswritable(filename):
-            QMessageBox.warning(self, app.caption(_("Error")),
-                _("Can't write to destination:\n\n{url}").format(url=filename))
-            return False
-        url = QUrl.fromLocalFile(filename)
-        doc.setUrl(url)
-        recentfiles.add(url)
-        return self.saveDocument(doc)
+        return self.saveDocument(doc, True)
         
     def closeDocument(self, doc):
         """ Closes the document, asking for saving if modified.
@@ -532,10 +555,12 @@ class MainWindow(QMainWindow):
         try:
             with open(filename, "w") as f:
                 f.write(data)
-        except (IOError, OSError) as err:
-            QMessageBox.warning(self, app.caption(_("Error")),
-                _("Can't write to destination:\n\n{url}\n\n{error}").format(
-                    url=filename, error=err.strerror))
+        except IOError as e:
+            msg = _("{message}\n\n{strerror} ({errno})").format(
+                message = _("Could not write to: {url}").format(url=filename),
+                strerror = e.strerror,
+                errno = e.errno)
+            QMessageBox.critical(self, app.caption(_("Error")), msg)
     
     def closeCurrentDocument(self):
         return self.closeDocument(self.currentDocument())
@@ -547,22 +572,31 @@ class MainWindow(QMainWindow):
         
         """
         d = self.currentDocument()
-        if d.load(True) is False:
-            QMessageBox.warning(self, app.caption(_("Reload")),
-              _("Could not reload the document:\n\n{url}").format(
-                url = d.url().toString()))
+        try:
+            d.load(keepUndo=True)
+        except IOError as e:
+            filename = d.url().toLocalFile()
+            msg = _("{message}\n\n{strerror} ({errno})").format(
+                message = _("Could not read from: {url}").format(url=filename),
+                strerror = e.strerror,
+                errno = e.errno)
+            QMessageBox.critical(self, app.caption(_("Error")), msg)
     
     def reloadAllDocuments(self):
         """Reloads all documents."""
-        success = []
+        failures = []
         for d in self.historyManager.documents():
-            success.append(d.load(True))
-        if False in success:
-            if True in success:
-                msg = _("Some documents could not be reloaded.")
-            else:
-                msg = _("No document could be reloaded.")
-            QMessageBox.warning(self, app.caption(_("Reload")), msg)
+            try:
+                d.load(keepUndo=True)
+            except IOError as e:
+                failures.append((d, e))
+        if failures:
+            msg = _("Could not reload:") + "\n\n" + "\n".join(
+                "{url}: {strerror} ({errno})".format(
+                    url = d.url().toLocalFile(),
+                    strerror = e.strerror,
+                    errno = e.errno) for d, e in failures)
+            QMessageBox.critical(self, app.caption(_("Error")), msg)
     
     def saveAllDocuments(self):
         """ Saves all documents.
@@ -629,11 +663,14 @@ class MainWindow(QMainWindow):
         filename = QFileDialog.getOpenFileName(self, caption, directory, filetypes)
         if filename:
             try:
-                data = open(filename).read()
-            except (IOError, OSError) as err:
-                QMessageBox.warning(self, app.caption(_("Error")),
-                    _("Can't read from source:\n\n{url}\n\n{error}").format(
-                        url=filename, error=err.strerror))
+                with open(filename) as f:
+                    data = f.read()
+            except IOError as e:
+                msg = _("{message}\n\n{strerror} ({errno})").format(
+                    message = _("Could not read from: {url}").format(url=filename),
+                    strerror = e.strerror,
+                    errno = e.errno)
+                QMessageBox.critical(self, app.caption(_("Error")), msg)
             else:
                 text = util.decode(data)
                 self.currentView().textCursor().insertText(text)
@@ -685,9 +722,12 @@ class MainWindow(QMainWindow):
         try:
             with open(filename, "wb") as f:
                 f.write(html.encode('utf-8'))
-        except (IOError, OSError) as err:
-            QMessageBox.warning(self, app.caption(_("Error")),
-                _("Can't write to destination:\n\n{url}\n\n{error}").format(url=filename, error=err))
+        except IOError as e:
+            msg = _("{message}\n\n{strerror} ({errno})").format(
+                message = _("Could not write to: {url}").format(url=filename),
+                strerror = e.strerror,
+                errno = e.errno)
+            QMessageBox.critical(self, app.caption(_("Error")), msg)
         
     def undo(self):
         self.currentView().undo()

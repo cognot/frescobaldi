@@ -41,18 +41,60 @@ class Document(QTextDocument):
     loaded = signals.Signal()
     saved = signals.Signal()
     
+    @classmethod
+    def load_data(cls, url, encoding=None):
+        """Class method to load document contents from an url.
+        
+        This is intended to open a document without instantiating one
+        if loading the contents fails.
+        
+        This method returns the text contents of the url as decoded text,
+        thus a unicode string.
+        
+        """
+        filename = url.toLocalFile()
+        
+        # currently, we do not support non-local files
+        if not filename:
+            raise IOError("not a local file")
+        with open(filename) as f:
+            data = f.read()
+        return util.decode(data, encoding)
+    
+    @classmethod
+    def new_from_url(cls, url, encoding=None):
+        """Create and return a new document, loaded from url.
+        
+        This is intended to open a new Document without instantiating one
+        if loading the contents fails.
+        
+        """
+        text = cls.load_data(url, encoding)
+        d = cls(url, encoding)
+        d.setPlainText(text)
+        d.setModified(False)
+        d.loaded()
+        app.documentLoaded(d)
+        return d
+        
     def __init__(self, url=None, encoding=None):
+        """Create a new Document with url and encoding.
+        
+        Does not load the contents, you should use load() for that, or
+        use the new_from_url() constructor to instantiate a new Document
+        with the contents loaded.
+        
+        """
+        if url is None:
+            url = QUrl()
         super(Document, self).__init__()
         self.setDocumentLayout(QPlainTextDocumentLayout(self))
         self._encoding = encoding
-        if url is None:
-            url = QUrl()
         self._url = url # avoid urlChanged on init
         self.setUrl(url)
         self.modificationChanged.connect(self.slotModificationChanged)
         app.documents.append(self)
         app.documentCreated(self)
-        self.load()
         
     def slotModificationChanged(self):
         app.documentModificationChanged(self)
@@ -62,57 +104,65 @@ class Document(QTextDocument):
         app.documentClosed(self)
         app.documents.remove(self)
 
-    def load(self, keepUndo=False):
-        """Loads the current url.
+    def load(self, url=None, encoding=None, keepUndo=False):
+        """Load the specified or current url (if None was specified).
         
-        Returns True if loading succeeded, False if an error occurred,
-        and None when the current url is empty or non-local.
-        Currently only local files are supported.
+        Currently only local files are supported. An IOError is raised
+        when trying to load a nonlocal URL.
+        
+        If loading succeeds and an url was specified, the url is make the
+        current url (by calling setUrl() internally).
         
         If keepUndo is True, the loading can be undone (with Ctrl-Z).
         
         """
-        fileName = self.url().toLocalFile()
-        if fileName:
-            try:
-                with open(fileName) as f:
-                    data = f.read()
-            except (IOError, OSError):
-                return False # errors are caught in MainWindow.openUrl()
-            text = util.decode(data)
-            if keepUndo:
-                c = QTextCursor(self)
-                c.select(QTextCursor.Document)
-                c.insertText(text)
-            else:
-                self.setPlainText(text)
-            self.setModified(False)
-            self.loaded()
-            app.documentLoaded(self)
-            return True
+        if url is None:
+            url = QUrl()
+        u = url if not url.isEmpty() else self.url()
+        text = self.load_data(u, encoding or self._encoding)
+        if keepUndo:
+            c = QTextCursor(self)
+            c.select(QTextCursor.Document)
+            c.insertText(text)
+        else:
+            self.setPlainText(text)
+        self.setModified(False)
+        if not url.isEmpty():
+            self.setUrl(url)
+        self.loaded()
+        app.documentLoaded(self)
             
-    def save(self):
-        """Saves the document to the current url.
+    def save(self, url=None, encoding=None):
+        """Saves the document to the specified or current url.
         
-        Returns True if saving succeeded, False if an error occurred,
-        and None when the current url is empty or non-local.
-        Currently only local files are supported.
+        Currently only local files are supported. An IOError is raised
+        when trying to save a nonlocal URL.
+        
+        If saving succeeds and an url was specified, the url is made the
+        current url (by calling setUrl() internally).
         
         """
+        if url is None:
+            url = QUrl()
+        u = url if not url.isEmpty() else self.url()
+        filename = u.toLocalFile()
+        # currently, we do not support non-local files
+        if not filename:
+            raise IOError("not a local file")
+        # keep the url if specified when we didn't have one, even if saving
+        # would fail
+        if self.url().isEmpty() and not url.isEmpty():
+            self.setUrl(url)
         with app.documentSaving(self):
-            fileName = self.url().toLocalFile()
-            if fileName:
-                try:
-                    with open(fileName, "w") as f:
-                        f.write(self.encodedText())
-                        f.flush()
-                        os.fsync(f.fileno())
-                except (IOError, OSError):
-                    return False
-                self.setModified(False)
-                self.saved()
-                app.documentSaved(self)
-                return True
+            with open(filename, "w") as f:
+                f.write(self.encodedText())
+                f.flush()
+                os.fsync(f.fileno())
+            self.setModified(False)
+            if not url.isEmpty():
+                self.setUrl(url)
+        self.saved()
+        app.documentSaved(self)
 
     def url(self):
         return self._url
